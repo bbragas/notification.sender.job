@@ -1,0 +1,51 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Sample SAM Template for Notification Sender Job
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 10
+
+Resources:
+  NotificationSenderJobFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      PackageType: Image
+      Events:
+        NotificationSenderJob:
+          Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+          Properties:
+            Path: /hello
+            Method: get
+      ImageUri: notificationsenderjobfunction:dotnet6.0-v1
+    Metadata:
+      DockerTag: dotnet6.0-v1
+      DockerContext: .
+      Dockerfile: Dockerfile
+      DockerBuildArgs:
+        SAM_BUILD_MODE: run
+      SamResourceId: NotificationSenderJobFunction
+
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+Outputs:
+  NotificationSenderJobApi:
+    Description: API Gateway endpoint URL for Prod stage for Notification Sender Job
+      function
+    Value:
+      Fn::Sub: https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/hello/
+  NotificationSenderJobFunction:
+    Description: Notification Sender Job Lambda Function ARN
+    Value:
+      Fn::GetAtt:
+      - NotificationSenderJobFunction
+      - Arn
+  NotificationSenderJobFunctionIamRole:
+    Description: Implicit IAM Role created for Notification Sender Job function
+    Value:
+      Fn::GetAtt:
+      - NotificationSenderJobFunctionRole
+      - Arn

@@ -1,0 +1,180 @@
+trigger:
+  branches:
+    include:
+      - main
+      - fix/*
+      - bug/*
+      - feat/*
+      - feature/*
+  paths:
+    exclude:
+      - README.md
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - name: major
+    value: v1
+  - name: minor
+    value: 0
+  - name: build
+    value: $(Build.BuildID)
+  - name: rev
+    value: "$(echo $(Build.SourceVersion) | cut -c1-7)"
+  - name: projectName
+    value: 'notification-v2'
+  - name: app
+    value: 'sender'
+  - name: ecrRepoName
+    value: 'notification-lambda'
+  - name: awsRegion
+    value: us-east-1
+  - name: handler
+    value: Notification.Sender.Job::Notification.Sender.Job.Function::HandleSQSEvent
+
+  - name: imageVersion
+    ${{ if eq(variables['Build.SourceBranchName'], 'main') }}:
+      value: '$(major).$(minor).$(build)'
+    ${{ else }}:
+      value: '$(major).$(minor).$(build)-dev'
+
+stages:
+  - stage: CI
+    displayName: 'Build the application'
+    jobs:
+    - job: 'Build'
+      displayName: 'Continuous Integration'
+      steps:
+      - task: UseDotNet@2
+        inputs:
+          packageType: 'sdk'
+          version: '6.0.x'
+
+      - bash: |
+          make build path=$(System.DefaultWorkingDirectory)
+        displayName: Build
+
+      - bash: |
+          make lint
+        displayName: Lint
+
+      - bash: |
+          make scan-sec path=$(System.DefaultWorkingDirectory)
+        displayName: Security Scan
+
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish Scan to Build Artifacts'
+        inputs:
+          PathtoPublish: '$(System.DefaultWorkingDirectory)/notification.sarif'
+          ArtifactName: 'CodeAnalysisLogs'
+          publishLocation: 'Container'
+
+      - bash: |
+          make test
+        displayName: Test
+
+      - task: PublishTestResults@2
+        displayName: 'Publish Test Results'
+        inputs:
+          testRunner: VSTest
+          testResultsFiles: '**/*.trx'
+          failTaskOnFailedTests: true
+
+  - stage: DotnetPublish
+    dependsOn: CI
+    displayName: Create publish zip
+    condition: succeeded()
+    jobs:
+    - job: Dotnet_Publish
+      displayName: 'Dotnet Publish'
+      condition: succeeded()
+      steps:
+      - bash: |
+          echo '##vso[task.setvariable variable=imageVersion]$(imageVersion)'
+          make publish path=$(System.DefaultWorkingDirectory)
+        displayName: Create publish artifacts
+
+      - task: ArchiveFiles@2
+        inputs:
+          rootFolderOrFile: '$(System.DefaultWorkingDirectory)/src/notification.sender.job/publish' 
+          includeRootFolder: false 
+          archiveType: 'zip' # Options: zip, 7z, tar, wim
+          tarCompression: 'gz' # Optional. Options: gz, bz2, xz, none
+          archiveFile: '$(System.DefaultWorkingDirectory)/$(imageVersion).zip' 
+          replaceExistingArchive: true 
+        displayName: Zip publish artifacts
+
+      - task: AWSShellScript@1
+        displayName: Push Docker Image
+        inputs:
+          awsCredentials: 'AWSVegaIT'
+          regionName: '$(awsRegion)'
+          scriptType: 'inline'
+          inlineScript: |
+            make publish-s3 path="$(System.DefaultWorkingDirectory)" project="$(projectName)" app="$(app)" imageVersion="$(imageVersion)"
+
+  - stage: Deploy_DEV
+    displayName: 'Deploy lambda - DEV'
+    condition: succeeded()
+    jobs:
+      - deployment: dev
+        displayName: Approval Request
+        environment: 'Notification-Sender-DEV'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - bash: |
+                    echo "$(Build.SourceVersion)"
+                    echo '##vso[task.setvariable variable=imageVersion]$(imageVersion)'
+                    echo "$(imageVersion)"
+                  displayName: Expand Variable Version
+
+                - checkout: git://notification/notification.release@refs/heads/main
+
+                - task: AWSShellScript@1
+                  inputs:
+                    awsCredentials: 'AWSVegaIT'
+                    regionName: '$(awsRegion)'
+                    scriptType: 'inline'
+                    inlineScript: |
+                      make deploy-lambda stage=dev region='$(awsRegion)' project="$(projectName)" app="$(app)" version="$(imageVersion)" handler="$(handler)"
+
+  - stage: IntegrationTest
+    displayName: 'Integration Test'
+    condition: succeeded()
+    jobs:
+      - job: Integration_Test
+        displayName: 'DEV - Integration Test'
+        steps:
+          - bash: |
+              echo "make integration-test"
+            displayName: Integration Test
+
+  - stage: Deploy_PROD
+    displayName: 'Deploy lambda - PROD'
+    condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'))
+    jobs:
+      - deployment: prod
+        displayName: Approval Request
+        environment: 'Notification-Sender-PROD'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - bash: |
+                    echo "$(Build.SourceVersion)"
+                    echo '##vso[task.setvariable variable=imageVersion]$(imageVersion)'
+                    echo "$(imageVersion)"
+                  displayName: Expand Variable Version
+
+                - checkout: git://notification/notification.release@refs/heads/main
+
+                - task: AWSShellScript@1
+                  inputs:
+                    awsCredentials: 'AWSVegaIT'
+                    regionName: '$(awsRegion)'
+                    scriptType: 'inline'
+                    inlineScript: |
+                      make deploy-lambda stage=prod region='$(awsRegion)' project="$(projectName)" app="$(app)" version="$(imageVersion)" handler="$(handler)"
